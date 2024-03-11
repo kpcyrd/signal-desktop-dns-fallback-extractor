@@ -9,6 +9,7 @@ use std::fs;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command;
 use std::str;
 
 const GIT_URL: &str = "https://github.com/signalapp/signal-desktop";
@@ -19,8 +20,8 @@ const DNS_FALLBACK_PATH: &str = "build/dns-fallback.json";
 struct Args {
     #[arg(short, long, action(ArgAction::Count))]
     pub verbose: u8,
-    #[arg(long)]
-    pub url: Option<String>,
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
     #[arg(long)]
     pub deb: Option<PathBuf>,
     #[arg(long)]
@@ -109,14 +110,44 @@ fn extract_from_deb(bytes: &[u8]) -> Result<String> {
     bail!("Could not find app.asar in .deb")
 }
 
-async fn prepare_release(url: &str) -> Result<()> {
-    info!("Preparing release for {url:?}");
-    let bytes = download(url)
+async fn prepare_release(version: &Version, dry_run: bool) -> Result<()> {
+    let version = version.to_string();
+    let existing = Command::new("git").args(["show", &version]).output()?;
+    if existing.status.success() {
+        info!("Tag already exists: {version}");
+        return Ok(());
+    }
+
+    let url = format!("https://updates.signal.org/desktop/apt/pool/s/signal-desktop/signal-desktop_{version}_amd64.deb");
+    let bytes = download(&url)
         .await
         .with_context(|| anyhow!("Failed to download {url:?}"))?;
 
     let json = extract_from_deb(&bytes)?;
     info!("json = {} bytes", json.len());
+
+    info!("Creating tag for version: {version}");
+    Command::new("git").args(["branch", "-D", "tmp"]).output()?;
+
+    debug!("git checkout");
+    sh!(git checkout "--orphan" tmp);
+    debug!("git reset");
+    sh!(git reset ".");
+    debug!("creating dns-fallback.json");
+    fs::write("dns-fallback.json", json.as_bytes()).context("Failed to write dns-fallback.json")?;
+    debug!("git add dns-fallback.json");
+    sh!(git add "dns-fallback.json");
+    debug!("git commit");
+    sh!(git commit "-m" {&version});
+    debug!("git tag");
+    sh!(git tag {&version});
+    sh!(git reset main);
+    sh!(git checkout main);
+
+    if !dry_run {
+        info!("Pushing tag...");
+        sh!(git push origin {&version});
+    }
 
     Ok(())
 }
@@ -133,9 +164,7 @@ async fn main() -> Result<()> {
 
     let mut had_error = false;
 
-    if let Some(url) = args.url {
-        prepare_release(&url).await?;
-    } else if let Some(path) = args.deb {
+    if let Some(path) = args.deb {
         let bytes = fs::read(path)?;
         let json = extract_from_deb(&bytes)?;
         print!("{json}");
@@ -149,10 +178,9 @@ async fn main() -> Result<()> {
             if version < MIN_VERSION {
                 continue;
             }
-            info!("Found version: {version}");
-            let url = format!("https://updates.signal.org/desktop/apt/pool/s/signal-desktop/signal-desktop_{version}_amd64.deb");
-            if let Err(err) = prepare_release(&url).await {
-                error!("Failed to prepare release for {version} from {url:?}: {err:#}");
+
+            if let Err(err) = prepare_release(&version, args.dry_run).await {
+                error!("Failed to prepare release for {version}: {err:#}");
                 had_error = true;
             }
         }

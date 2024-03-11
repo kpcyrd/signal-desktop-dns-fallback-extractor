@@ -3,6 +3,8 @@ name: Monitor signal-desktop releases
 on:
   push:
     branches: [ 'main' ]
+  pull_request:
+    branches: [ 'main' ]
   schedule:
     - cron: '0 */3 * * *'
   workflow_dispatch:
@@ -26,5 +28,10 @@ jobs:
           target/
         key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-release-
+    - name: 🏗️ Setup git
+      run: |
+        git config user.email "noreply@example.com"
+        git config user.name "github actions"
+        git fetch --tags
     - name: 🎬 Run
       run: cargo run --release
